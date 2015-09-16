@@ -14,6 +14,13 @@
 #include <media/tvp5150.h>
 #include <media/v4l2-ctrls.h>
 
+#include <linux/of_gpio.h>
+#include <linux/of.h>
+#include <linux/of_graph.h>
+#include <media/v4l2-async.h>
+#include <media/v4l2-common.h>
+#include <media/v4l2-of.h>
+
 #include "tvp5150_reg.h"
 
 #define TVP5150_H_MAX		720U
@@ -36,7 +43,6 @@ struct tvp5150 {
 	struct v4l2_subdev sd;
 	struct v4l2_ctrl_handler hdl;
 	struct v4l2_rect rect;
-
 	v4l2_std_id norm;	/* Current set standard */
 	u32 input;
 	u32 output;
@@ -1091,6 +1097,85 @@ static const struct v4l2_subdev_ops tvp5150_ops = {
 	.vbi = &tvp5150_vbi_ops,
 };
 
+/****************************************************************************
+           Modificació init TVP5150
+****************************************************************************/
+
+static int tvp5150_init(struct i2c_client *client)
+{
+       /*
+        * From TVP5151 datasheet Table 3-8. Reset and Power-Down Modes
+        *   PDN RESETB CONFIGURATION
+        *    0    0    Reserved (unknown state)
+        *    0    1    Powers down the decoder
+        *    1    0    Resets the decoder
+        *    1    1    Normal operation
+        *
+        * If TVP5151_PDN and TPVP5151_RESET is set to 0 the I2C2_SDA line
+        * is forced to low level and all devices connected to I2C2 stop
+        * working, this affects to EEPROM connected to the same bus. By default
+        * we should configure these pins to logical 1 (Normal operation)
+        *
+        */
+        
+       struct device_node *np = client->dev.of_node;
+       int pdn_pin;
+       int reset_pin;
+       int error1;
+       int error2;
+        
+	   if (!np)
+				return -ENODEV;
+       
+       pdn_pin = of_get_named_gpio(np, "power_down_gpio", 0);
+       printk ("********* assignacio del gpio power_down %d *********\n",pdn_pin);
+       
+       if (!gpio_is_valid(pdn_pin)) {
+				printk ("power_down pin no valid");
+                 return -ENODEV;
+			}
+	   reset_pin = of_get_named_gpio(np, "reset_gpio", 0);
+	   printk ("********* assignacio del gpio reset_pin %d *********\n",reset_pin);
+	   if (!gpio_is_valid(reset_pin)) {
+				 printk ("reset pin no valid");
+                 return -ENODEV;
+			}
+           
+
+		error1 = devm_gpio_request_one(&client->dev,
+					pdn_pin, GPIOF_OUT_INIT_LOW,
+					"tvp5150 power_down_gpio");
+				printk("********** resposta gpio request : %d **********\n",error1);
+		error2 = devm_gpio_request_one(&client->dev,
+					reset_pin, GPIOF_OUT_INIT_LOW,
+					"tvp5150 reset_gpio");
+				printk("********** resposta gpio request : %d **********\n",error2);
+	/*				
+      
+       if (gpio_direction_output(pdn_pin, 0) == 0)
+               gpio_export(pdn_pin, 0);
+       else
+               pr_warning("IGEP: Could not obtain gpio TVP5151 PDN ISEE\n");
+               
+       if (gpio_direction_output(reset_pin, 0) == 0) {
+               gpio_export(reset_pin, 0);
+    */
+       
+               /* Initialize TVP5151 power up sequence */
+              // udelay(10);
+               msleep(10);
+               gpio_set_value(pdn_pin, 1);
+               msleep(10);
+               printk ("*************** power down activat ************\n");
+               gpio_set_value(reset_pin, 1);
+               msleep(200);
+               printk ("************** reset activat ****************\n");
+    /*
+       } else
+               pr_warning("IGEP: Could not obtain gpio TVP5151 RESET ISEE\n");
+    */  
+       return 0;	
+}
 
 /****************************************************************************
 			I2C Client & Driver
@@ -1103,23 +1188,41 @@ static int tvp5150_probe(struct i2c_client *c,
 	struct v4l2_subdev *sd;
 	int tvp5150_id[4];
 	int i, res;
-
+	int error;
+    printk(" **************inici probe tvp5150******************\n");
+        
 	/* Check if the adapter supports the needed features */
 	if (!i2c_check_functionality(c->adapter,
 	     I2C_FUNC_SMBUS_READ_BYTE | I2C_FUNC_SMBUS_WRITE_BYTE_DATA))
 		return -EIO;
-
+    printk(" **************step1******************\n");
 	core = devm_kzalloc(&c->dev, sizeof(*core), GFP_KERNEL);
 	if (!core)
 		return -ENOMEM;
+	printk(" **************step2******************\n");
+	
 	sd = &core->sd;
 	v4l2_i2c_subdev_init(sd, c, &tvp5150_ops);
+	
+/******************************************************************
+  Modificació device tree ISEE
+ ****************************************************************/
+	 
+	error = tvp5150_init(c);
+	printk(" **************init tvp5150******************\n");
+    if (error) {
+        dev_err(&c->dev, "Failed to init the controller ISEE\n");
+        return error;
+    }
+    
+/****************************************************************/
 
 	/* 
 	 * Read consequent registers - TVP5150_MSB_DEV_ID, TVP5150_LSB_DEV_ID,
 	 * TVP5150_ROM_MAJOR_VER, TVP5150_ROM_MINOR_VER 
 	 */
 	for (i = 0; i < 4; i++) {
+		printk("********* lectura del i2c **************\n");
 		res = tvp5150_read(sd, TVP5150_MSB_DEV_ID + i);
 		if (res < 0)
 			return res;
@@ -1167,6 +1270,18 @@ static int tvp5150_probe(struct i2c_client *c,
 		v4l2_ctrl_handler_free(&core->hdl);
 		return res;
 	}
+	
+/******************************************************************
+ * Modificacio v4l2 async register subdev ISEE
+ * ***************************************************************
+	//core->sd.dev = &c->dev;
+	error = v4l2_async_register_subdev(&core->sd);
+	if (error < 0){
+		dev_err(&c->dev, "Failed in media entity init ISEE\n");
+		return error;
+	}
+/****************************************************************/
+	
 	v4l2_ctrl_handler_setup(&core->hdl);
 
 	/* Default is no cropping */
@@ -1205,8 +1320,21 @@ static const struct i2c_device_id tvp5150_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, tvp5150_id);
 
+/**********************************************************************
+  modifició TVP5150 DeviceTree ISEE
+ **********************************************************************/
+ 
+static const struct of_device_id tvp5150_of_match[] = {
+    { .compatible = "ti,tvp5150", },
+	{ /* sentinel */ },
+};
+MODULE_DEVICE_TABLE(of, tvp5150_of_match);
+
+/***********************************************************************/
+
 static struct i2c_driver tvp5150_driver = {
 	.driver = {
+		.of_match_table = of_match_ptr(tvp5150_of_match), /* Modificació device tree ISEE */
 		.owner	= THIS_MODULE,
 		.name	= "tvp5150",
 	},
